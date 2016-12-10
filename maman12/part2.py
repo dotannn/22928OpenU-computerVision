@@ -120,6 +120,7 @@ def detect(samples, codebook,  model, dsift_step_size ):
     
     return y
     
+    
 # params 
 basedir = 'data'
 class_a = 'opencountry'
