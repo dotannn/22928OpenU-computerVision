@@ -33,7 +33,7 @@ class Timer(object):
 
 def calcBOWDescriptor( features, codebook ):
     label = codebook.predict(features)
-    hist, bins = np.histogram(label,100,[1,101])
+    hist, bins = np.histogram(label,codebook.n_clusters,[1,codebook.n_clusters+1])
     return hist
 
 def calcRocAvarage(tpr_list,fpr_list):
