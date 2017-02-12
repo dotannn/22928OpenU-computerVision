@@ -15,14 +15,15 @@ import math
 import cv2
 import numpy as np
 from sklearn import svm
-from sklearn import metrics
-import sklearn
 from skimage import feature
 import scipy.fftpack as fp
 from scipy import ndimage
 import progressbar
 from sklearn.multiclass import OneVsRestClassifier
+from sklearn.multiclass import OneVsOneClassifier
 from sklearn.neighbors import KNeighborsClassifier
+import dill # this is used to pickle lambda functions
+import pickle
 
 # Template for affine alignment describing the canonical form of face representation
 TEMPLATE = np.float32([
@@ -64,14 +65,13 @@ TEMPLATE = np.float32([
 TPL_MIN, TPL_MAX = np.min(TEMPLATE, axis=0), np.max(TEMPLATE, axis=0)
 MINMAX_TEMPLATE = (TEMPLATE - TPL_MIN) / (TPL_MAX - TPL_MIN)
 
-
 INNER_EYES_AND_BOTTOM_LIP = [39, 42, 57]
 OUTER_EYES_AND_NOSE = [36, 45, 33]
 
 class FaceRecotnition:
     def __init__(self, in_method='none', pn_method='none',\
                  crop=(-1,-1), features='lbph_ror', S=8, radius=2, grid_x=8, grid_y=7,\
-                 hist_norm='default', classifier='nn_chi2'):
+                 hist_norm='default', classifier='nn_chi2', C=200,finetune=1):
         """
         Class c'str
     
@@ -81,7 +81,7 @@ class FaceRecotnition:
         ----------
         in_method : string
             illumination normalization method.
-            possible values: 'tantriggs', 'homomorphic', 'none'
+            possible values: 'tantriggs', 'homomorphic', 'equalizehist', 'none'
             default : 'none'
             
         pn_method : string
@@ -95,7 +95,7 @@ class FaceRecotnition:
             
         features : string
             feature extractor methods
-            possible values: 'lbpror_h', 'lbp_h', 'tplbp_h', 'tplbp_lbpror_h'
+            possible values: 'lbpror_h', 'lbp_h', 'tplbp_h', 'tplbp_lbpror_h'. 'ltp_h'
             default : 'lbpror_h'
             
         S : int :
@@ -126,7 +126,12 @@ class FaceRecotnition:
             possible values: 'nn_chi2' one nearest neighbor with chi2-dist metric
                              'nn_l2' -  one nearest neighbor with l2 metric
                              'linearsvm' - Multiclass linear svm
-                             'rbfsvm' - Multiclass rbf svm
+                             'rbfsvm' - Multiclass rbf svm.
+  
+        C: float
+            regularization term for SVM
+        finetune: bool
+            flag indicates whether to do finetune on specific pairs
         """  
         self.in_method= in_method
         self.pn_method= pn_method
@@ -138,10 +143,10 @@ class FaceRecotnition:
         self.grid_y= grid_y
         self.hist_norm =hist_norm
         self.classifier_type = classifier
-    
+        self.C = C
         self.eps = 1e-7
-        
-        print('v0.9')
+        self.finetune = finetune
+        print('v0.19')
         
         self.cascades = []
         self.cascades.append(dlib.get_frontal_face_detector())
@@ -160,20 +165,58 @@ class FaceRecotnition:
             self.classifier = KNeighborsClassifier(n_neighbors=1,
                      algorithm='auto',
                      metric=lambda a,b: self.chi2_d(a,b))
-            
         elif (self.classifier_type == 'linearsvm'):
-            self.classifier = OneVsRestClassifier(svm.SVC(kernel='linear', C=100))
+            self.classifier = OneVsRestClassifier(svm.SVC(probability=True, kernel='linear', C=self.C))
         elif (self.classifier_type == 'rbfsvm'):
-            self.classifier = OneVsRestClassifier(svm.SVC(kernel='rbf', C=500))
+            self.classifier = OneVsOneClassifier(svm.SVC(probability=True, kernel='rbf', C=self.C))
         else:
             self.classifier = KNeighborsClassifier(n_neighbors=1)
+            
+        if self.finetune:
+            self.classifier7_5 = svm.SVC(probability=True, kernel='linear', C=self.C)
+            self.classifier25_22 = svm.SVC(probability=True, kernel='linear', C=self.C)
+            
     def get_config(self):
         return 'FACE-REC  in_method: ' + self.in_method + ', pn_method:'+\
             self.pn_method +', crop:'+str(self.crop) + ', desc:'+ self.features+\
             ', S:' + str(self.S) + ', Radius:' + str(self.radius) + ', grid:('+str(self.grid_y) + ','+str(self.grid_x)+\
-            '), hist-norm:' + self.hist_norm + ', classifier: ' + self.classifier_type
-                         
-                         
+            '), hist-norm:' + self.hist_norm + ', classifier: ' + self.classifier_type + ', finetune:' + str(self.finetune)
+    
+    
+    def __getstate__(self):
+        d = dict(self.__dict__)
+        del d['clahe']
+        del d['cascades']
+        del d['landmarkDetector']
+        return d
+        
+    def __setstate__(self, d):
+        d['clahe'] = cv2.createCLAHE( clipLimit=10.0,  tileGridSize=(12,12))
+        d['cascades'] = []
+        d['cascades'].append(dlib.get_frontal_face_detector())
+        d['cascades'].append(cv2.CascadeClassifier('./lbpcascade_frontalface.xml'))
+        d['cascades'].append(cv2.CascadeClassifier('./lbpcascade_profileface.xml'))
+        d['cascades'].append(cv2.CascadeClassifier('./haarcascade_frontalface_default.xml'))
+        d['cascades'].append(cv2.CascadeClassifier('./haarcascade_frontalface_alt.xml'))
+        d['cascades'].append(cv2.CascadeClassifier('./haarcascade_frontalface_alt2.xml'))
+        d['cascades'].append(cv2.CascadeClassifier('./haarcascade_frontalface_alt_tree.xml'))
+        d['cascades'].append(cv2.CascadeClassifier('./haarcascade_profileface.xml'))
+        d['landmarkDetector'] = dlib.shape_predictor('./shape_predictor_68_face_landmarks.dat')
+        
+        self.__dict__.update(d) 
+        
+        
+    def save( self, filename):
+        # save the classifier
+        with open(filename, 'wb') as fid:
+            pickle.dump(self, fid)    
+            
+    @staticmethod        
+    def load( filename) :
+        with open(filename, 'rb') as fid:
+            return pickle.load(fid)        
+
+
     def detect_face(self,image):
         """
         Detect Faces
@@ -298,12 +341,17 @@ class FaceRecotnition:
         """ 
         lmarks = np.array(self.detect_landmark(img,bb))
         
+        if self.crop ==(-1,-1):
+            crop = (img.shape[0],img.shape[1])
+        else :
+            crop = self.crop
+            
         eye_l = (lmarks[37] + lmarks[38] + lmarks[40] + lmarks[41]) * 0.25
         eye_r = (lmarks[43] + lmarks[44] + lmarks[46] + lmarks[47]) * 0.25
 
         # calculate offsets in original image
-        offset_h = math.floor(0.25*self.crop[0])
-        offset_v = math.floor(0.25*self.crop[1])
+        offset_h = math.floor(0.25*crop[0])
+        offset_v = math.floor(0.25*crop[1])
         
         # get the direction
         eye_direction = (eye_r[0] - eye_l[0], eye_r[1] - eye_l[1])
@@ -318,7 +366,7 @@ class FaceRecotnition:
         dist = math.sqrt(dx*dx+dy*dy)
         
         # calculate the reference eye-width
-        reference = self.crop[0] - 2.0*offset_h
+        reference = crop[0] - 2.0*offset_h
         # scale factor
         scale = float(dist)/float(reference)
         
@@ -329,7 +377,7 @@ class FaceRecotnition:
         
         # crop the rotated image
         crop_xy = (int(eye_l[1] - scale*offset_h), int(eye_l[0] - scale*offset_v))
-        crop_size = (int(self.crop[0]*scale), int(self.crop[1]*scale))
+        crop_size = (int(crop[0]*scale), int(crop[1]*scale))
         
         cropped = res[crop_xy[0]:crop_xy[0]+ crop_size[0],crop_xy[1]:crop_xy[1]+ crop_size[1]]
 
@@ -386,6 +434,12 @@ class FaceRecotnition:
         list of np.array 
             list of cropped-aligned images
         """  
+        
+        if self.crop ==(-1,-1):
+            crop = (img.shape[0],img.shape[1])
+        else :
+            crop = self.crop
+            
         croppedImgs =[]
         print 'detect, align and crop faces'
         bar = progressbar.ProgressBar()
@@ -407,11 +461,11 @@ class FaceRecotnition:
                 processedImg = self.noramlize_alignment_affine(processedImg, bb)   
                 smaller = min(processedImg.shape[0],processedImg.shape[1])
                 cropped = processedImg[:smaller,:smaller]
-                croppedResized= cv2.resize(cropped,(self.crop[1],self.crop[0]))
+                croppedResized= cv2.resize(cropped,(crop[1],crop[0]))
                 croppedImgs.append(croppedResized)
             elif (self.pn_method=='rotate'):
                 cropped = self.noramlize_alignment_rotate(processedImg, bb)   
-                croppedResized= cv2.resize(cropped,(self.crop[1],self.crop[0]))
+                croppedResized= cv2.resize(cropped,(crop[1],crop[0]))
                 croppedImgs.append(croppedResized)
             else:
                 # take some extras around the detected face:
@@ -430,7 +484,7 @@ class FaceRecotnition:
                     dif = processedImg.shape[0] - (bbUse[1] + bbUse[3])
                     bbUse[1] += dif
                 cropped = processedImg[bbUse[1]:bbUse[1]+bbUse[3], bbUse[0]:bbUse[0]+bbUse[2]]
-                croppedResized= cv2.resize(cropped,(self.crop[1],self.crop[0]))
+                croppedResized= cv2.resize(cropped,(crop[1],crop[0]))
                 croppedImgs.append(croppedResized)
                 
         return croppedImgs
@@ -486,7 +540,7 @@ class FaceRecotnition:
                     hist = np.histogram(region.flatten(), bins=bins, range=(0, bins), normed=False)[0] 
                     # apply the Hellinger kernel by first L1-normalizing and taking the
                     # square-root
-                    hist /= hist.sum()# + self.eps)
+                    hist = hist / (hist.sum()+ self.eps)
                     hist = np.sqrt(hist)
                 else:
                     # or just standard norm (unit vec)
@@ -560,17 +614,20 @@ class FaceRecotnition:
         
         based on: https://lear.inrialpes.fr/pubs/2007/TT07/Tan-amfg07a.pdf
         
-        
         Parameters
         ----------
         img : np.array
             the input image
         alpha : float
+			a strongly compressive exponent that reduces the influence of large values
         tau: float
+			threshold used to truncate large values after the first phase of normalization
         gamma : float
+			gamma for the gamma correction
         sigma0: float
+			lower std for the DoG filtering
         sigma1: float
-        
+			higher std for the DoG filtering
         Returns
         -------
         list of np.array 
@@ -764,7 +821,9 @@ class FaceRecotnition:
             in_norm = self.TanTriggs
         elif self.in_method == 'homomorphic':
             in_norm = self.homomofphic_filtering
-        else : 
+        elif self.in_method=='equalizehist':
+            in_norm = cv2.equalizeHist
+        else :
             return imgs
             
         normed_imgs = []
@@ -829,6 +888,38 @@ class FaceRecotnition:
             
         return np.vstack(features)
     
+    def process_imgs(self, imgs):
+        """
+        combine all the process from input images to feature for the classifier
+        
+        Parameters
+        ----------
+        imgs : list of np.array
+            list of input images
+        
+        Returns
+        -------
+        array of the images as features(face signatures)
+            
+        """    
+        # Start with detect align and crop(if nessecary):
+        res = imgs[0].shape
+
+        #ybinarized = label_binarize(y)
+        
+        if (self.crop != (-1,-1) and self.crop != res ):
+            cropped_imgs = self.align_crop_faces(imgs)
+        else :
+            cropped_imgs = imgs
+        
+        # illumination normalization:
+        if (self.in_method != 'none'):
+            normalized_imgs= self.normalize_illumination(cropped_imgs)
+        else :
+            normalized_imgs = cropped_imgs
+            
+        return self.extract_features(normalized_imgs)
+        
     def train(self, imgs, y):
         """
         Train the model from input images with labels
@@ -842,25 +933,31 @@ class FaceRecotnition:
         """ 
         
         # detect-align-crop -> illumination normalization->extract features-> learn model
-
-        # Start with detect align and crop(if nessecary):
-        res = imgs[0].shape
-        if (self.crop != (-1,-1) and self.crop != res ):
-            cropped_imgs = self.align_crop_faces(imgs)
-        else :
-            cropped_imgs = imgs
-        
-        # illumination normalization:
-        if (self.in_method != 'none'):
-            normalized_imgs= self.normalize_illumination(cropped_imgs)
-        else :
-            normalized_imgs = cropped_imgs
-            
-        features = self.extract_features(normalized_imgs)
+        features = self.process_imgs(imgs)
         
         self.dictionary_ = features
+        self.ydictionary_ = np.array(y)
         # learn model
         self.classifier.fit(features, y)
+        
+        # finetune to specific pairs(25->22),(7->5):
+        if self.finetune==1:
+            y_np = np.array(y)
+            x7 = features[y_np==7]
+            x5 = features[y_np==5]
+
+            x7_5=np.vstack((x7,x5))     
+            y7_5 = [0]*len(x7) + [1]*len(x5)
+            
+            self.classifier7_5.fit(x7_5, y7_5)            
+            x25 = features[y_np==25]
+            x22 = features[y_np==22]
+
+            x25_22=np.vstack((x25,x22))     
+            y25_22 = [0]*len(x25) + [1]*len(x22)
+            self.classifier25_22.fit(x25_22, y25_22)            
+            
+            
     
     def predict(self, imgs):
         """
@@ -876,22 +973,29 @@ class FaceRecotnition:
         array of prediction labels for the input images
             
         """    
-         # Start with detect align and crop(if nessecary):
-        res = imgs[0].shape
-        if (self.crop != (-1,-1) and self.crop != res ):
-            cropped_imgs = self.align_crop_faces(imgs)
-        else :
-            cropped_imgs = imgs
+        features = self.process_imgs(imgs)
         
-        # illumination normalization:
-        if (self.in_method != 'none'):
-            normalized_imgs= self.normalize_illumination(cropped_imgs)
-        else :
-            normalized_imgs = cropped_imgs
+        y= self.classifier.predict(features)
+        
+        if self.finetune==1:
+            y_np = np.array(y)
             
-        features = self.extract_features(normalized_imgs)
+            idx7 = np.where(y_np==7)[0]
+            idx25 = np.where(y_np==25)[0]
+            
+            y7_5 = self.classifier7_5.predict(features[idx7])
+            y25_22 = self.classifier25_22.predict(features[idx25])
+            
+            idx7to5 = idx7[y7_5==1]
+            idx25to22 = idx25[y25_22==1]
+            y_np[idx7to5] = 5
+            y_np[idx25to22] = 22
+
+            y = y_np
+            
         
-        return self.classifier.predict(features)
+        return y
+        
     
     def predict_proba(self,imgs):
         """
@@ -907,19 +1011,38 @@ class FaceRecotnition:
         array of probabilities for the input images
             
         """    
-         # Start with detect align and crop(if nessecary):
-        res = imgs[0].shape
-        if (self.crop != (-1,-1) and self.crop != res ):
-            cropped_imgs = self.align_crop_faces(imgs)
-        else :
-            cropped_imgs = imgs
-        
-        # illumination normalization:
-        if (self.ni!= 'none'):
-            normalized_imgs= self.normalize_illumination(cropped_imgs)
-        else :
-            normalized_imgs = cropped_imgs
-            
-        features = self.extract_features(normalized_imgs)
+        features = self.process_imgs(imgs)
 
-        return self.classifier.predict_proba(features)
+        
+        if type(self.classifier) ==KNeighborsClassifier: 
+            #in case of 1-NN classifier we don't have classic threshold ore 
+            # score so we create one based on the distance from the nearest neighbor
+            # and use this as a probability
+            
+            n_samples = len(features)
+            n_classes = len(self.classifier.classes_)
+            
+            yscore = np.zeros((n_samples, n_classes))
+            
+            # take distances from closest neighbor
+            dist, neighborIdx= self.classifier.kneighbors(features)
+            
+            label = self.ydictionary_[neighborIdx]
+            #convert distances to score (apply 1/dist and normalize)
+            score = 1/(dist+self.eps)
+            
+            #score *= (1/score.max()) # try without normalizing
+            
+            for i in range(n_samples):
+                yscore[i, label[i]] = score[i]
+            
+            pass
+        else :
+            yscore= self.classifier.predict_proba(features)
+        
+        if self.finetune==1:
+            # Don't sure how to apply finetune to prediction probability
+            pass
+        
+        return yscore
+        

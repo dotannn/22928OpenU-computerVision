@@ -1,0 +1,28 @@
+my dependencies:
+
+
+dlib
+
+opencv (cv2)
+
+numpy
+
+sklearn
+
+skimage
+
+scipy
+
+progressbar
+
+itertools
+
+glob
+
+os
+
+pickle
+
+dill
+
+models from : https://www.dropbox.com/s/1htv6ils5yhzyfj/model.7z?dl=0 
